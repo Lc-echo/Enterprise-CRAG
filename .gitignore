@@ -42,6 +42,7 @@ data/chroma_db/
 data/milvus_local.db/
 data/rag_metadata.db
 data/chunks.pkl
+data/private/
 *.log
 
 # Sensitive config
