@@ -1,0 +1,49 @@
+# Enterprise-CRAG 生产依赖清单
+
+# ==================== LangChain & LangGraph 核心框架 ====================
+langchain>=1.0.0
+langchain-core>=1.0.0
+langchain-community>=0.4.0
+langchain-classic>=1.0.0
+langchain-openai>=0.3.0
+langchain-text-splitters>=1.0.0
+langgraph>=1.0.0
+
+# ==================== 向量数据库与检索 ====================
+pymilvus>=3.0.0
+langchain-milvus>=0.4.0
+chromadb>=0.5.0
+langchain-chroma>=0.2.0
+rank-bm25>=0.2.2
+duckduckgo-search>=6.0.0
+
+# ==================== 嵌入模型与重排模型 (Embedding & Reranker) ====================
+sentence-transformers>=3.0.0
+langchain-huggingface>=0.1.0
+torch>=2.0.0
+transformers>=4.40.0
+dashscope>=1.14.0
+
+# ==================== 关系型元数据库 ====================
+SQLAlchemy>=2.0.0
+PyMySQL>=1.1.0
+cryptography>=42.0.0
+
+# ==================== 基础与配置 ====================
+pydantic>=2.7.0
+pydantic-settings>=2.2.0
+python-dotenv>=1.0.0
+
+# ==================== 文档解析 Loader ====================
+pypdf>=4.0.0
+python-docx>=1.1.0
+docx2txt>=0.8
+
+# ==================== Web 表现层与 API ====================
+fastapi>=0.110.0
+uvicorn>=0.28.0
+python-multipart>=0.0.9
+streamlit>=1.35.0
+
+# ==================== 测试套件 ====================
+pytest>=8.0.0
