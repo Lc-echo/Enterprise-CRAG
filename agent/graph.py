@@ -145,3 +145,7 @@ def build_crag_graph():
 
     logger.info("✅ Enterprise-CRAG 状态图组装完成，编译运行时...")
     return workflow.compile()
+
+
+# 默认编译实例，供 LangGraph CLI / Studio 工具链直接加载
+graph = build_crag_graph()

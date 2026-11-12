@@ -262,6 +262,53 @@ class DatabaseManager:
         finally:
             session.close()
 
+    def get_active_document_by_hash(self, file_hash: str) -> Optional[Dict[str, Any]]:
+        """
+        按内容 MD5 指纹查询当前活跃的同内容文档 (入库查重，保证入库幂等)
+        :return: {"document_id", "filename", "parent_chunks", "child_chunks"}，未命中返回 None
+        """
+        if not file_hash:
+            return None
+        session = self.get_session()
+        try:
+            doc = (
+                session.query(Document)
+                .filter(Document.file_hash == file_hash, Document.is_active == True)
+                .order_by(Document.id.asc())
+                .first()
+            )
+            if not doc:
+                return None
+            return {
+                "document_id": doc.id,
+                "filename": doc.filename,
+                "parent_chunks": len(doc.parent_chunks),
+                "child_chunks": doc.chunk_count or 0,
+            }
+        finally:
+            session.close()
+
+    def hard_delete_document(self, doc_id: int) -> bool:
+        """
+        物理删除指定主文档及其全部父子块记录 (ORM 级联 all, delete-orphan)。
+        用途：入库流水线中途失败时的补偿回滚，避免遗留孤儿主文档元数据。
+        """
+        session = self.get_session()
+        try:
+            doc = session.query(Document).filter(Document.id == doc_id).first()
+            if not doc:
+                return False
+            session.delete(doc)
+            session.commit()
+            logger.info("文档 (id=%d) 及其父子块已物理删除 (补偿回滚)", doc_id)
+            return True
+        except Exception as e:
+            session.rollback()
+            logger.error("物理删除文档失败 (id=%d): %s", doc_id, e)
+            return False
+        finally:
+            session.close()
+
     def get_parent_chunks_by_parent_ids(self, parent_ids: List[str]) -> Dict[str, Dict[str, Any]]:
         """
         按 parent_id 列表批量高效查询父块正文与元数据 (毫秒级关系型数据库索引查询)
@@ -272,9 +319,12 @@ class DatabaseManager:
             return {}
         session = self.get_session()
         try:
+            # join 主文档过滤 is_active：软删除文档的父块不允许再反查进入生成上下文
             records = (
                 session.query(ParentChunk)
+                .join(Document, ParentChunk.document_id == Document.id)
                 .filter(ParentChunk.parent_id.in_(parent_ids))
+                .filter(Document.is_active == True)
                 .all()
             )
             result = {}

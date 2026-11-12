@@ -16,6 +16,7 @@ Enterprise-CRAG 核心节点函数定义模块 (LangGraph Execution Nodes)
 """
 
 import logging
+import re
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field
 
@@ -79,6 +80,14 @@ llm_evaluator = ChatOpenAI(
 _global_vector_manager: Optional[VectorStoreManager] = None
 _global_db_manager: Optional[Any] = None
 
+# =============================================================================
+# 上下文长度预算 (字符数)：生成与质检阶段共享同一份裁剪，保证「质检看到的资料」
+# 与「生成看到的资料」一致，避免质检把来自被截断部分的正确内容误判为幻觉
+# =============================================================================
+GENERATE_PARENT_LIMIT = 8000    # 本地父块语境上限 (最多 4 个 1500 字父块 + 重叠)
+GENERATE_WEB_LIMIT = 4000       # 联网补充资料上限
+GENERATE_HISTORY_LIMIT = 2000   # 多轮对话历史上限
+
 
 def get_vector_manager() -> VectorStoreManager:
     """获取或延迟懒加载向量存储管理器单例"""
@@ -86,6 +95,20 @@ def get_vector_manager() -> VectorStoreManager:
     if _global_vector_manager is None:
         _global_vector_manager = VectorStoreManager(config)
     return _global_vector_manager
+
+
+def get_db_manager() -> Any:
+    """
+    获取或延迟懒加载数据库管理器单例。
+    依赖兜底：langgraph dev / LangGraph Studio 直接加载 agent/graph.py:graph 时
+    不经过 RAGService，模块级 _global_db_manager 为 None；此处按需构建，
+    保证该路径下父块反查 (expand_parent_documents) 依然可用，不降级为 400 字子块正文。
+    """
+    global _global_db_manager
+    if _global_db_manager is None:
+        from core.database import DatabaseManager
+        _global_db_manager = DatabaseManager(config)
+    return _global_db_manager
 
 
 def set_vector_manager(manager: VectorStoreManager) -> None:
@@ -98,6 +121,27 @@ def set_db_manager(manager: Any) -> None:
     """支持外部依赖注入数据库管理器"""
     global _global_db_manager
     _global_db_manager = manager
+
+
+def _keyword_boolean_parse(
+    content: str,
+    false_patterns: List[str],
+    true_patterns: List[str],
+    default: bool,
+) -> bool:
+    """
+    结构化输出异常时的文本降级布尔解析 (否定优先匹配)。
+    子串朴素匹配会把『不相关』误判为相关、『不存在幻觉』误判为存在幻觉：
+    因此先匹配否定模式，再匹配肯定模式，均未命中时按 default 保守放行。
+    """
+    text = (content or "").strip().lower()
+    for pattern in false_patterns:
+        if re.search(pattern, text):
+            return False
+    for pattern in true_patterns:
+        if re.search(pattern, text):
+            return True
+    return default
 
 
 # =============================================================================
@@ -128,8 +172,9 @@ def retrieve_node(state: GraphState) -> Dict[str, Any]:
         filter_doc_ids=filter_doc_ids,
     )
 
-    # 2. 逆向拓展取回完整语义父块 (传入 db_manager 优先从关系数据库毫秒级查询，消除假向量化依赖)
-    parent_docs = vm.expand_parent_documents(child_docs, db_manager=_global_db_manager)
+    # 2. 逆向拓展取回完整语义父块 (get_db_manager 优先从关系数据库毫秒级查询，消除假向量化依赖；
+    #    RAGService 初始化时注入的实例优先，langgraph dev 直连 graph 时按需懒加载兜底)
+    parent_docs = vm.expand_parent_documents(child_docs, db_manager=get_db_manager())
 
     # 3. 构建上下文与引用溯源信息
     parent_context_str = "\n\n---\n\n".join([d.page_content for d in parent_docs])
@@ -176,11 +221,11 @@ def grade_documents_node(state: GraphState) -> Dict[str, Any]:
 
     logger.info("🧐 [节点 2: 文档评分] 评估上下文与问题的相关性...")
 
-    # 若检索库为空，直接判定不相关
+    # 若检索库为空，直接判定不相关 (仍需遵守 ENABLE_WEB_SEARCH 合规开关，禁止绕过)
     if not parent_context.strip():
         logger.warning("   -> 本地检索上下文为空，直接标记需要外部补偿")
         return {
-            "web_search_required": True,
+            "web_search_required": bool(config.ENABLE_WEB_SEARCH),
             "grade_reasoning": "本地知识库检索未召回任何内容",
             "execution_steps": execution_steps,
         }
@@ -199,14 +244,18 @@ def grade_documents_node(state: GraphState) -> Dict[str, Any]:
         reasoning = result.reasoning
         logger.info("   -> 结构化评分完成: is_relevant=%s, 理由: %s", is_relevant, reasoning)
     except Exception as e:
-        # 第二层防护：文本调用降级模式
+        # 第二层防护：文本调用降级模式 (否定优先关键词解析，避免『不相关』被误判为肯定)
         logger.warning("   -> 结构化输出失败 (%s)，回退至字符串匹配降级模式...", e)
         try:
             resp = llm_evaluator.invoke(
                 GRADE_PROMPT.format_messages(question=question, context=parent_context[:2000])
             )
-            content_lower = resp.content.strip().lower()
-            is_relevant = "true" in content_lower or "相关" in resp.content or "yes" in content_lower
+            is_relevant = _keyword_boolean_parse(
+                resp.content,
+                false_patterns=[r"不相关", r"无关", r"false", r"not\s+relevant", r"\bno\b"],
+                true_patterns=[r"相关", r"true", r"\byes\b"],
+                default=True,  # 解析失败按保守放行，与上层『异常放行』策略一致
+            )
             reasoning = f"文本降级解析: {resp.content[:60]}"
         except Exception as fallback_err:
             logger.error("   -> 评分降级仍失败: %s，默认放行", fallback_err)
@@ -235,6 +284,14 @@ def web_search_node(state: GraphState) -> Dict[str, Any]:
     question = state["question"]
     execution_steps = list(state.get("execution_steps", []))
     execution_steps.append("web_search")
+
+    # 入口兜底检查：企业内网 / 合规禁外网 (ENABLE_WEB_SEARCH=false) 时绝不发起外部请求
+    if not config.ENABLE_WEB_SEARCH:
+        logger.warning("🌐 [节点 3: 联网补偿] ENABLE_WEB_SEARCH=False，按合规配置跳过外部联网搜索")
+        return {
+            "web_context": "（已按配置禁用外部联网搜索）",
+            "execution_steps": execution_steps,
+        }
 
     logger.info("🌐 [节点 3: 联网补偿] 本地知识不足，正在调用外部搜索: %s", question)
     web_text = ""
@@ -271,12 +328,29 @@ def generate_node(state: GraphState) -> Dict[str, Any]:
     web_context = state.get("web_context", "") or "（未触发联网补偿）"
     chat_history = state.get("chat_history", "") or "（无前序历史）"
     retry_count = state.get("retry_count", 0)
+    previous_generation = state.get("generation", "") or ""
+    hallucination_reasoning = state.get("hallucination_reasoning", "") or ""
+
+    # 自反思闭环：重试轮次将上一轮草稿与质检理由注入提示词，要求针对性修正而非盲重采样
+    if retry_count > 0 and previous_generation:
+        revision_context = (
+            f"[上一轮回答]:\n{previous_generation[:2000]}\n\n"
+            f"[质检发现的修正意见]: {hallucination_reasoning or '事实一致性核查未通过，存在无依据表述'}\n"
+            f"请针对以上问题逐条修正后重新作答。"
+        )
+    else:
+        revision_context = "（首轮生成，无）"
+
+    # 统一上下文预算裁剪：防止 4 个父块 + 联网摘要 + 多轮历史超出模型上下文
+    parent_context = parent_context[:GENERATE_PARENT_LIMIT]
+    web_context = web_context[:GENERATE_WEB_LIMIT]
+    chat_history = chat_history[:GENERATE_HISTORY_LIMIT]
 
     execution_steps = list(state.get("execution_steps", []))
     execution_steps.append("generate")
 
     if retry_count > 0:
-        logger.info("✍️ [节点 4: 回答生成] 第 %d 次触发自纠错重新生成...", retry_count + 1)
+        logger.info("✍️ [节点 4: 回答生成] 第 %d 次触发自纠错重新生成 (携带质检修正意见)...", retry_count + 1)
     else:
         logger.info("✍️ [节点 4: 回答生成] 正在综合上下文撰写回答...")
 
@@ -287,6 +361,7 @@ def generate_node(state: GraphState) -> Dict[str, Any]:
             "parent_context": parent_context,
             "web_context": web_context,
             "chat_history": chat_history,
+            "revision_context": revision_context,
         })
         answer = response.content
     except Exception as e:
@@ -322,7 +397,10 @@ def hallucination_check_node(state: GraphState) -> Dict[str, Any]:
     execution_steps = list(state.get("execution_steps", []))
     execution_steps.append("hallucination_check")
 
-    all_context = f"{parent_context}\n\n{web_context}".strip()
+    # 与生成阶段共享同一份预算裁剪，保证质检看到的资料与生成看到的资料一致
+    all_context = (
+        f"{parent_context[:GENERATE_PARENT_LIMIT]}\n\n{web_context[:GENERATE_WEB_LIMIT]}"
+    ).strip()
     if not all_context:
         # 当无参考资料时，模型表达“不知道”或“未找到”不属于幻觉，正常放行
         return {
@@ -349,12 +427,18 @@ def hallucination_check_node(state: GraphState) -> Dict[str, Any]:
         try:
             resp = llm_evaluator.invoke(
                 HALLUCINATION_PROMPT.format_messages(
-                    context=all_context[:2500],
+                    context=all_context,
                     generation=generation,
                 )
             )
-            content_lower = resp.content.strip().lower()
-            has_hallucination = "true" in content_lower or "存在幻觉" in resp.content
+            # 否定优先关键词解析：『不存在幻觉』不得被误判为存在幻觉
+            # (false 模式命中返回 False 即"无幻觉"；均未命中按 default=False 保守放行)
+            has_hallucination = _keyword_boolean_parse(
+                resp.content,
+                false_patterns=[r"不存在幻觉", r"无幻觉", r"没有幻觉", r"未发现幻觉", r"未见幻觉", r"false", r"\bno\b"],
+                true_patterns=[r"存在幻觉", r"幻觉", r"true", r"\byes\b"],
+                default=False,
+            )
             reasoning = f"降级解析: {resp.content[:60]}"
         except Exception:
             has_hallucination = False

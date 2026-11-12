@@ -24,6 +24,7 @@ from datetime import datetime
 from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from config.config import config
@@ -50,10 +51,12 @@ app = FastAPI(
 )
 
 # 允许跨域请求 (CORS 中间件配置)
+# CORS 规范：通配符源 "*" 不允许与 allow_credentials=True 同时开启 (浏览器会拒绝带凭据请求，
+# 且该组合等于把接口向任意站点凭据开放)，通配符模式下必须关闭凭据携带
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -109,13 +112,16 @@ async def root():
 
 
 @app.post("/api/v1/chat", response_model=ChatResponse, summary="执行 CRAG 智能问答")
-async def chat_endpoint(req: ChatRequest):
+def chat_endpoint(req: ChatRequest):
     """
     【核心问答接口】
     调用流程通过 RAGService 统一纳管：
     1. 自动维护会话 ID 与滑动窗口上下文；
     2. 驱动 LangGraph 状态图执行：检索 -> 评分 -> 联网补偿(若需) -> 生成 -> 幻觉核查；
     3. 结果原子落盘并返回结构化响应体。
+
+    注意：声明为普通同步 def，FastAPI 会自动将其放入线程池执行；
+    若声明为 async def，同步阻塞的向量检索/LLM 调用会占满事件循环，导致并发请求串行。
     """
     try:
         res = rag_service.chat(
@@ -150,14 +156,17 @@ async def upload_document(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="不能上传空文件")
 
     try:
-        return rag_service.ingest_document_bytes(file_bytes=file_bytes, filename=file.filename)
+        # 同步的解析/切块/向量化链路放入线程池，避免阻塞事件循环
+        return await run_in_threadpool(
+            rag_service.ingest_document_bytes, file_bytes=file_bytes, filename=file.filename
+        )
     except Exception as e:
         logger.error("上传处理失败 %s: %s", file.filename, e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"文件处理异常: {str(e)}")
 
 
 @app.get("/api/v1/documents", response_model=List[DocumentItem], summary="获取知识库文档列表")
-async def list_documents():
+def list_documents():
     """获取所有处于活跃状态 (is_active=True) 的知识库文档元数据"""
     docs = db_manager.get_all_documents(active_only=True)
     return [
@@ -174,7 +183,7 @@ async def list_documents():
 
 
 @app.delete("/api/v1/documents/{doc_id}", summary="删除知识库文档")
-async def delete_document(doc_id: int):
+def delete_document(doc_id: int):
     """
     下线并删除指定知识库文档：
     1. 关系数据库执行软删除 (is_active=False)，保留合规审计追踪；
@@ -188,13 +197,13 @@ async def delete_document(doc_id: int):
 
 
 @app.get("/api/v1/sessions", summary="获取历史会话列表")
-async def list_sessions(limit: int = Query(20, ge=1, le=100)):
+def list_sessions(limit: int = Query(20, ge=1, le=100)):
     """获取最近活跃的会话列表，附带首条提问智能提炼的标题与时间"""
     return db_manager.get_all_sessions(limit=limit)
 
 
 @app.get("/api/v1/sessions/{session_id}/history", summary="获取指定会话问答记录")
-async def get_session_history(session_id: str):
+def get_session_history(session_id: str):
     """获取指定会话下的全部历史问答明细"""
     records = db_manager.get_chat_history(session_id, limit=50)
     return [
@@ -210,14 +219,14 @@ async def get_session_history(session_id: str):
 
 
 @app.delete("/api/v1/sessions/{session_id}", summary="清空指定会话记录")
-async def clear_session(session_id: str):
+def clear_session(session_id: str):
     """物理清空指定会话的历史聊天记录"""
     db_manager.clear_session_history(session_id)
     return {"status": "success", "message": "会话历史已清空"}
 
 
 @app.get("/health", summary="系统健康探针")
-async def health_check():
+def health_check():
     """生产级微服务健康探针，输出系统各项核心组件运行状态"""
     all_docs = db_manager.get_all_documents(active_only=True)
     return {

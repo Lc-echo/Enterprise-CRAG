@@ -107,15 +107,21 @@ def main():
                 session_id=session_id,
             )
 
-            # 格式化打印流转轨迹指示灯
+            # 格式化打印流转轨迹指示灯 (质检/评分结论取自真实 final_state，而非推断)
             steps = res.get("execution_steps", [])
             web_used = res.get("web_search_used", False)
+            final_state = res.get("final_state", {})
+            hallucination_detected = final_state.get("hallucination_detected", False)
+            retry_count = final_state.get("retry_count", 0)
             step_icons = {
                 "retrieve": "🔍 [多路混合检索与父块回溯]",
-                "grade_documents": f"📊 [文档相关度评分: {'合格' if not web_used else '不相关'}]",
+                "grade_documents": f"📊 [文档相关度评分: {'合格' if not web_used else '不相关, 已触发联网补偿'}]",
                 "web_search": "🌐 [触发联网搜索补偿]",
                 "generate": "✍️ [大模型综合生成]",
-                "hallucination_check": "🛡️ [幻觉一致性质检: 通过]",
+                "hallucination_check": (
+                    "🛡️ [幻觉一致性质检: 通过]" if not hallucination_detected
+                    else f"🛡️ [幻觉一致性质检: 发现问题 (重试 {retry_count} 次后交付)]"
+                ),
             }
             step_display = " -> ".join([step_icons.get(s, s) for s in steps])
             print(f"   轨迹: {step_display}")

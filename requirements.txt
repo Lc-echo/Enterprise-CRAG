@@ -8,6 +8,7 @@ langchain-classic>=1.0.0
 langchain-openai>=0.3.0
 langchain-text-splitters>=1.0.0
 langgraph>=1.0.0
+langgraph-cli[inmem]==0.4.30
 
 # ==================== 向量数据库与检索 ====================
 pymilvus>=3.0.0
@@ -47,3 +48,4 @@ streamlit>=1.35.0
 
 # ==================== 测试套件 ====================
 pytest>=8.0.0
+

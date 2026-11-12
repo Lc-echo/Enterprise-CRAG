@@ -50,7 +50,9 @@ GRADE_PROMPT = ChatPromptTemplate.from_messages([
 # - 任务目标：高质量生成结构化、易读、诚实、有理有据的企业级回答；
 # - 引用优先级：本地参考资料 > 联网补充资料；
 # - 防幻觉强制准则：“若资料中没有，明确回答未找到”，严禁胡乱猜测；
-# - 输入槽位：{chat_history} 滑动窗口记忆, {parent_context} 逆向展开父块, {web_context} 外部搜索补偿, {question} 当前问题。
+# - 自反思闭环：{revision_context} 在重试轮次注入上一轮草稿与质检理由，要求针对性修正而非盲重采样；
+# - 输入槽位：{chat_history} 滑动窗口记忆, {parent_context} 逆向展开父块, {web_context} 外部搜索补偿,
+#             {revision_context} 上一轮回答与质检修正意见, {question} 当前问题。
 GENERATE_PROMPT = ChatPromptTemplate.from_messages([
     (
         "system",
@@ -60,7 +62,8 @@ GENERATE_PROMPT = ChatPromptTemplate.from_messages([
 1. 【事实优先】：所有关键论述必须有依据，优先采纳本地参考资料；如果触发了联网补充资料，可结合补充。
 2. 【诚实严谨】：若上下文资料中没有相关信息，请明确诚实地回答“根据现有企业知识库及补充资料，未能找到相关信息”，严禁胡乱编造。
 3. 【逻辑清晰】：采用结构化分点排版，突出核心结论与重要细节。
-4. 【多轮对话】：结合提供的历史对话背景，理解用户的代词与上下文关联。"""
+4. 【多轮对话】：结合提供的历史对话背景，理解用户的代词与上下文关联。
+5. 【针对性修正】：若提供了上一轮回答草稿与质检修正意见，必须逐条吸收质检意见、修正上一轮回答中的事实问题，严禁原样重复上一轮的错误表述。"""
     ),
     (
         "human",
@@ -72,6 +75,9 @@ GENERATE_PROMPT = ChatPromptTemplate.from_messages([
 
 【联网补充资料】:
 {web_context}
+
+【上一轮回答草稿与质检修正意见】:
+{revision_context}
 
 【当前问题】: {question}
 

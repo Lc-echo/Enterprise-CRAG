@@ -74,7 +74,10 @@ def run_ingest(docs_dir: str = config.DOCS_DIR) -> None:
             res = rag_service.ingest_document_file(file_path)
             total_parents += res["parent_chunks"]
             total_children += res["child_chunks"]
-            logger.info("✅ 成功入库: %s (Doc ID: %d, 父块: %d, 子块: %d)", filename, res["document_id"], res["parent_chunks"], res["child_chunks"])
+            if res.get("status") == "skipped_duplicate":
+                logger.info("⏭️ 内容指纹已存在，跳过重复入库: %s (已有 Doc ID: %d)", filename, res["document_id"])
+            else:
+                logger.info("✅ 成功入库: %s (Doc ID: %d, 父块: %d, 子块: %d)", filename, res["document_id"], res["parent_chunks"], res["child_chunks"])
         except Exception as e:
             logger.error("处理文档失败 %s: %s", filename, e, exc_info=True)
 

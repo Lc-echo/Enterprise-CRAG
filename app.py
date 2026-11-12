@@ -326,7 +326,7 @@ def main():
 
                 status.update(label="✅ 智能体自校正核验完成！", state="complete", expanded=False)
 
-            # 流式打字机视觉输出
+            # 打字机动画输出 (注：为同步阻塞调用，完整答案生成后再逐字渲染，非真流式)
             full_answer = res.get("answer", "未能生成回答")
             streamed_text = ""
             for char in full_answer:

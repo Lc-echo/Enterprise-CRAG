@@ -36,6 +36,10 @@ ENV/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.langgraph_api/
+
+# Local tooling workspace
+.workbuddy/
 
 # Project data
 data/chroma_db/

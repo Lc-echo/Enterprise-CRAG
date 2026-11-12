@@ -4,7 +4,9 @@ Enterprise-CRAG 全局状态定义模块 (LangGraph State Architecture)
 核心架构职责与设计哲学：
 1. 【全局共享黑板模式 (Blackboard Pattern)】：
    - LangGraph 的所有节点 (Node) 都是无状态纯函数，其入参与返回值均基于强类型状态字典；
-   - 每个节点只消费自己需要的字段，并在返回时产出增量字典，由 LangGraph 自动合并 (Reducer)；
+   - 每个节点只消费自己需要的字段，并在返回时产出增量字典；
+   - 注意：GraphState 未声明 Annotated[..., reducer]，LangGraph 对字段默认是覆盖写而非自动合并，
+     因此节点内需先复制再追加 (如 execution_steps = list(state.get(...)) 后 append)。
 2. 【全生命周期信息流追溯】：
    - 涵盖从用户输入、多轮会话窗口、混合检索命中的子块、逆向展开的父块、
      Corrective 评分信号、联网搜索补偿、LLM 生成回答、反思质检结果到审计轨迹的全部字段；

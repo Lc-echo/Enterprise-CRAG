@@ -17,6 +17,7 @@ Enterprise-CRAG 向量存储与两阶段混合检索管理器
 """
 
 import os
+import re
 import json
 import pickle
 import logging
@@ -45,6 +46,30 @@ from langchain_classic.retrievers import EnsembleRetriever
 from config.config import config
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# BM25 中文友好分词器
+# =============================================================================
+# LangChain BM25Retriever 默认 preprocess_func 为 text.split()，对中文整句只产出
+# 一个 token，任何中文短查询都是 OOV，稀疏检索全 0 分完全失效。
+# 此处采用零依赖混合策略：拉丁/数字按连续词切分并统一小写；CJK 连续片段切为
+# 重叠二元 bigram (单字片段保留原字)，保证查询与文档共享同一套词表语义。
+_TOKEN_RUN_RE = re.compile(r"[\u4e00-\u9fff]+|[a-zA-Z0-9_]+")
+
+
+def cjk_aware_tokenizer(text: str) -> List[str]:
+    """BM25 稀疏检索统一分词函数：CJK 二元 bigram + 拉丁词混合切分"""
+    tokens: List[str] = []
+    for run in _TOKEN_RUN_RE.findall(text or ""):
+        if "\u4e00" <= run[0] <= "\u9fff":
+            if len(run) == 1:
+                tokens.append(run)
+            else:
+                tokens.extend(run[i:i + 2] for i in range(len(run) - 1))
+        else:
+            tokens.append(run.lower())
+    return tokens
 
 
 class VectorStoreManager:
@@ -279,7 +304,10 @@ class VectorStoreManager:
                     cached_chunks = pickle.load(f)  # 全库所有已入库文档的全部子块列表 (List[Document]，仅含子块无父块)
                 if cached_chunks:
                     # from_documents: 给倒排索引器传入全量子块数据源 (cached_chunks)，在内存中建立词表与倒排索引
-                    self.bm25_retriever = BM25Retriever.from_documents(cached_chunks)
+                    # preprocess_func: 显式传入中文友好分词器，避免默认 text.split() 导致中文整句单 token 全 OOV
+                    self.bm25_retriever = BM25Retriever.from_documents(
+                        cached_chunks, preprocess_func=cjk_aware_tokenizer
+                    )
                     # .k 属性：设置检索结果数量上限 (Top-K)，控制搜索时最多返回前多少篇最相关的文档切片
                     self.bm25_retriever.k = self.config.TOP_K * 2#给倒排索引器传入值
                     logger.info("✅ 成功加载 BM25 词表缓存，共包含 %d 个子块", len(cached_chunks))
@@ -294,12 +322,16 @@ class VectorStoreManager:
         try:
             # exist_ok=True: 若目录已存在则忽略不报错，不存在则自动递归创建
             os.makedirs(os.path.dirname(chunks_path), exist_ok=True)
-            # "wb": 二进制覆盖写入模式 (Write Binary，文件不存在则创建，存在则清空重写；专用于写入二进制字节流)
-            # pickle.dump: 将内存对象序列化为二进制字节流，直接写入文件句柄 f (持久化保存到磁盘)
-            with open(chunks_path, "wb") as f:
+            # 原子写入：先写临时文件再 os.replace 原子替换，避免写入中途崩溃留下损坏的 pickle
+            # (直接 "wb" 清空重写时，进程意外退出会导致下次加载静默失败、BM25 分支直接消失)
+            tmp_path = f"{chunks_path}.{os.getpid()}.tmp"
+            with open(tmp_path, "wb") as f:
                 pickle.dump(all_child_chunks, f)
+            os.replace(tmp_path, chunks_path)
             # 重新实例化：BM25 不支持增量追加且全局词频/IDF已改变，重新构建以实现免重启实时热更新
-            self.bm25_retriever = BM25Retriever.from_documents(all_child_chunks)
+            self.bm25_retriever = BM25Retriever.from_documents(
+                all_child_chunks, preprocess_func=cjk_aware_tokenizer
+            )
             self.bm25_retriever.k = self.config.TOP_K * 2
             logger.info("BM25 缓存持久化完成，更新检索器")
         except Exception as e:

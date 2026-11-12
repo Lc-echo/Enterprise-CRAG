@@ -6,7 +6,7 @@
 [![Milvus](https://img.shields.io/badge/VectorDB-Milvus%20%2819530%29-00B4D8.svg)](https://milvus.io)
 [![FastAPI](https://img.shields.io/badge/API-FastAPI-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com)
 [![Streamlit](https://img.shields.io/badge/UI-Streamlit-FF4B4B.svg?logo=streamlit&logoColor=white)](https://streamlit.io)
-[![Tests Passing](https://img.shields.io/badge/tests-19%2F19%20passed-brightgreen.svg)](tests/)
+[![Tests Passing](https://img.shields.io/badge/tests-16%20passed%20%2F%203%20skipped-brightgreen.svg)](tests/)
 
 ---
 
@@ -114,7 +114,7 @@ flowchart TD
 
     subgraph Stage4["第四阶段: 双库事务持久化与三端交付"]
         GraphEnd --> SaveHistory["💾 DatabaseManager.save_chat_history()<br>1. 原子写入 chat_history 数据表<br>2. 记录 session_id、问答正文、document_ids 与 sources JSON<br>3. 更新会话首问智能提炼标题 (22字优雅截断)"]
-        SaveHistory --> DeliverResponse["🚀 交付标准化响应结构 ChatResponse<br>• Streamlit: 真流式打字机渲染、CRAG 状态灯、引用抽屉、URL 同步<br>• FastAPI: 遵循 RESTful 规范输出 JSON 响应载荷<br>• CLI: 终端彩色打印节点流转轨迹与最终结果"]
+        SaveHistory --> DeliverResponse["🚀 交付标准化响应结构 ChatResponse<br>• Streamlit: 打字机动画渲染、CRAG 状态灯、引用抽屉、URL 同步<br>• FastAPI: 遵循 RESTful 规范输出 JSON 响应载荷<br>• CLI: 终端彩色打印节点流转轨迹与最终结果"]
     end
 ```
 
@@ -252,7 +252,7 @@ flowchart TD
 ### 7. 统一服务层解耦与 ChatGPT 风格三端交互
 - **RAGService 业务中枢**：统一封装入库、问答、多轮上下文、文档删除逻辑，解耦各表现层。
 - **FastAPI 生产微服务 (`api.py`)**：严格遵循 RESTful 规范，提供 Swagger UI 在线调试、文件上传解析、健康探针与 CORS 跨域支持。
-- **Streamlit 智能看板 (`app.py`)**：支持真流式打字机渲染、CRAG 状态灯实时点亮、引用证据抽屉，以及基于 URL Query 参数（`?session_id=`）的无刷新多会话状态恢复。
+- **Streamlit 智能看板 (`app.py`)**：支持打字机动画渲染（完整答案生成后逐字呈现）、CRAG 状态灯实时点亮、引用证据抽屉，以及基于 URL Query 参数（`?session_id=`）的无刷新多会话状态恢复。
 
 ---
 
@@ -374,7 +374,7 @@ ENABLE_WEB_SEARCH=true
 ```
 
 > [!NOTE]
-> **零依赖极速开箱**：若本机未安装 MySQL 或 Milvus 服务，系统具备全套自动降级机制 —— 关系库自动降级为嵌入式 SQLite，向量库可配置为本地 Chroma，无需安装任何外部复杂数据库即可秒级运行！
+> **轻依赖极速开箱**：若本机未安装 MySQL 服务，关系库自动无缝降级为嵌入式 SQLite；若未启动 Milvus，请在 `.env` 中将 `VECTOR_STORE_TYPE` 显式设为 `chroma` 以启用本地嵌入式向量库（向量库故障时不会自动切换引擎）。运行前需配置 LLM API Key 与嵌入模型（本地模型路径或 DashScope）。
 >
 > 若在无外网连接或受限网络环境中，可将 `RERANKER_ENABLED` 设置为 `false` 跳过 Cross-Encoder 权重下载，系统将自动基于 RRF 初筛结果顺滑运行；或将 `RERANKER_MODEL_PATH` 指向预先下载好的本地模型目录。
 
@@ -398,7 +398,7 @@ python -m streamlit run app.py
 - 浏览器打开 `http://localhost:8501`；
 - 支持企业文档拖拽上传与实时切分入库；
 - 具备 ChatGPT 风格多会话管理与首问自动标题提炼；
-- 具备真流式打字机渲染、CRAG 状态机指示灯与引用证据抽屉。
+- 具备打字机动画渲染、CRAG 状态机指示灯与引用证据抽屉。
 
 #### 模式 B: 生产级 RESTful 微服务 API
 ```powershell

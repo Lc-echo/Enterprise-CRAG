@@ -18,8 +18,6 @@ from config.config import config
 from core.database import DatabaseManager
 from core.document_processor import DocumentProcessor
 from core.vectorstore import VectorStoreManager
-from agent.graph import build_crag_graph
-from agent.nodes import set_vector_manager, set_db_manager
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +38,17 @@ class RAGService:
         self.doc_processor = doc_processor or DocumentProcessor(self.config)
         self.vector_manager = vector_manager or VectorStoreManager(self.config)
 
-        # 依赖注入至 Agent 节点环境
+        # 依赖注入至 Agent 节点环境 (局部导入避免与 agent 形成顶层循环依赖)
+        from agent.nodes import set_vector_manager, set_db_manager
         set_vector_manager(self.vector_manager)
         set_db_manager(self.db_manager)
 
         # 编译 LangGraph 状态机运行时
-        self.crag_graph = crag_graph or build_crag_graph()
+        if crag_graph is not None:
+            self.crag_graph = crag_graph
+        else:
+            from agent.graph import build_crag_graph
+            self.crag_graph = build_crag_graph()
         logger.info("✅ RAG 统一业务服务已初始化就绪")
 
     def ingest_document_file(self, file_path: str) -> Dict[str, Any]:
@@ -64,12 +67,29 @@ class RAGService:
         return self._execute_ingest(file_bytes=file_bytes, filename=filename, file_path=f"uploaded://{filename}")
 
     def _execute_ingest(self, file_bytes: bytes, filename: str, file_path: str) -> Dict[str, Any]:
-        """入库流水线原子实现"""
+        """入库流水线原子实现：MD5 查重幂等入口，失败时补偿回滚，不留孤儿数据"""
         if not file_bytes:
             raise ValueError(f"文档内容为空: {filename}")
 
         file_hash = self.doc_processor.calculate_hash(file_bytes)
         file_size = len(file_bytes)
+
+        # 0. MD5 查重：内容指纹一致的活跃文档已存在时直接跳过，保证重复上传/重跑 ingest 幂等
+        existing = self.db_manager.get_active_document_by_hash(file_hash)
+        if existing:
+            logger.info(
+                "文档 MD5 指纹命中已有活跃文档 (Doc ID=%d, %s)，跳过重复入库",
+                existing["document_id"],
+                existing["filename"],
+            )
+            return {
+                "status": "skipped_duplicate",
+                "message": "文档内容指纹已存在，跳过重复入库",
+                "document_id": existing["document_id"],
+                "filename": existing["filename"],
+                "parent_chunks": existing["parent_chunks"],
+                "child_chunks": existing["child_chunks"],
+            }
 
         # 1. 解析原始文档
         raw_docs = self.doc_processor.load_from_bytes(file_bytes, filename)
@@ -77,35 +97,51 @@ class RAGService:
         if not full_text.strip():
             raise ValueError(f"文档未能提取出有效文本: {filename}")
 
-        # 2. 关系数据库主文档落盘 (获取真实自增主键)
-        doc_id = self.db_manager.save_document(
-            filename=filename,
-            file_path=file_path,
-            content=full_text,
-            file_hash=file_hash,
-            file_size=file_size,
-        )
+        # 2~5. 两阶段落库与向量化；任一环节失败即执行补偿回滚 (清向量 + 清关系库)，
+        #       避免主文档独立 commit 后半途失败留下 chunk_count=0 的孤儿记录
+        doc_id = None
+        try:
+            # 2. 关系数据库主文档落盘 (获取真实自增主键)
+            doc_id = self.db_manager.save_document(
+                filename=filename,
+                file_path=file_path,
+                content=full_text,
+                file_hash=file_hash,
+                file_size=file_size,
+            )
 
-        # 3. 两级父子拓扑切分
-        parent_docs, child_docs = self.doc_processor.create_parent_child_chunks(
-            documents=raw_docs,
-            document_id=doc_id,
-            filename=filename,
-        )
+            # 3. 两级父子拓扑切分
+            parent_docs, child_docs = self.doc_processor.create_parent_child_chunks(
+                documents=raw_docs,
+                document_id=doc_id,
+                filename=filename,
+            )
 
-        # 4. 向量库持久化 (架构重构：父文档免向量化，仅子文档做向量化与索引)
-        c_vids = self.vector_manager.add_documents(
-            child_docs=child_docs,
-            document_id=doc_id,
-        )
+            # 4. 向量库持久化 (架构重构：父文档免向量化，仅子文档做向量化与索引)
+            c_vids = self.vector_manager.add_documents(
+                child_docs=child_docs,
+                document_id=doc_id,
+            )
 
-        # 5. 回填父子块外键与向量 ID 映射关系 (父文档直接落盘关系库，权威原文由关系库管理)
-        self.db_manager.save_chunks(
-            document_id=doc_id,
-            parent_docs=parent_docs,
-            child_docs=child_docs,
-            child_vector_ids=c_vids,
-        )
+            # 5. 回填父子块外键与向量 ID 映射关系 (父文档直接落盘关系库，权威原文由关系库管理)
+            self.db_manager.save_chunks(
+                document_id=doc_id,
+                parent_docs=parent_docs,
+                child_docs=child_docs,
+                child_vector_ids=c_vids,
+            )
+        except Exception:
+            logger.exception("文档入库流水线失败，执行补偿回滚: %s", filename)
+            if doc_id is not None:
+                try:
+                    self.vector_manager.delete_document_vectors(doc_id)
+                except Exception as vec_err:
+                    logger.warning("补偿清理向量库失败 (Doc ID=%d): %s", doc_id, vec_err)
+                try:
+                    self.db_manager.hard_delete_document(doc_id)
+                except Exception as db_err:
+                    logger.warning("补偿清理关系库失败 (Doc ID=%d): %s", doc_id, db_err)
+            raise
 
         logger.info("✅ 文档入库成功: %s (Doc ID=%d, 父块=%d, 子块=%d)", filename, doc_id, len(parent_docs), len(child_docs))
         return {
